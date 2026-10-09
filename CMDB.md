@@ -78,10 +78,16 @@
 
 ## 3. Secrets & Credentials
 
+All secrets live in Azure Key Vault `fabric-meteoseek-kv`
+(`https://fabric-meteoseek-kv.vault.azure.net/`) and are read by notebooks via
+`mssparkutils.credentials.getSecret(vault_uri, secret_name)`.
+
 | CI ID | Secret | Location | Accessors |
 |---|---|---|---|
-| SEC-01 | Euskalmet private key (JWT signing) | Azure Key Vault → Fabric secret | Ingestion pipeline |
-| SEC-02 | Seeketing `login` / `password` | Azure Key Vault → Fabric secret | Ingestion pipeline |
+| SEC-01 | Euskalmet `euskalmet-priv-key` (RS256 JWT signing) | KV `fabric-meteoseek-kv` | Ingestion pipeline |
+| SEC-01 | Euskalmet `euskalmet-pub-key` (public half) | KV `fabric-meteoseek-kv` | (verification) |
+| SEC-01 | Euskalmet `euskalmet-fingerprint` (JWT `kid` header) | KV `fabric-meteoseek-kv` | Ingestion pipeline |
+| SEC-02 | Seeketing `seeketing-login` / `seeketing-password` / `seeketing-app-id` | KV `fabric-meteoseek-kv` | Ingestion pipeline |
 | SEC-03 | Seeketing session `key` (derived) | Never persisted; in-memory per run | Ingestion pipeline |
 | SEC-04 | Hermes read-only connector credentials | Hermes secret store | Hermes Agent |
 

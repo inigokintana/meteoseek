@@ -95,11 +95,18 @@ def get_secret(secret_name: str) -> str:
 # --------------------------------------------------------------------------- #
 # Euskalmet JWT (RS256) helpers
 # --------------------------------------------------------------------------- #
+def _b64url(data: bytes) -> str:
+    """Base64url-encode bytes without padding (RFC 7515)."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
 def build_euskalmet_jwt(
     private_key_pem: str,
+    fingerprint: Optional[str] = None,
     aud: str = "met01.apikey",
     version: str = "1.0.0",
     email: str = "meteoseek@example.com",
+    iss: str = "meteoseek",
     ttl_seconds: int = 300,
 ) -> str:
     """Build a signed RS256 JWT for the Euskalmet API.
@@ -107,27 +114,48 @@ def build_euskalmet_jwt(
     Claims follow CMDB.md SRC-EUS-04..06:
         aud=met01.apikey, version=1.0.0, iss/iat/exp/email.
 
-    Requires PyJWT. Fabric Spark runtimes ship with a JWT-capable stdlib, but
-    PyJWT must be available; add it to the Spark pool environment or use the
-    `cryptography` package directly.
+    The Euskadi API Manager authenticates via an RSA keypair registered with the
+    portal; the key's fingerprint is carried in the JWT header as `kid`. We sign
+    with the private key using `cryptography` (ships with every Fabric Spark
+    runtime) so no PyJWT dependency is required.
     """
-    import jwt  # PyJWT
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    header: Dict[str, Any] = {"alg": "RS256", "typ": "JWT"}
+    if fingerprint:
+        header["kid"] = fingerprint
 
     now = int(time.time())
     payload = {
         "aud": aud,
         "version": version,
-        "iss": "meteoseek",
+        "iss": iss,
         "iat": now,
         "exp": now + ttl_seconds,
         "email": email,
     }
-    return jwt.encode(payload, private_key_pem, algorithm="RS256")
+
+    signing_input = (
+        _b64url(json.dumps(header, separators=(",", ":")).encode("ascii"))
+        + "."
+        + _b64url(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    )
+
+    key = serialization.load_pem_private_key(private_key_pem.encode("utf-8"), password=None)
+    signature = key.sign(
+        signing_input.encode("ascii"),
+        padding.PKCS1v15(),
+        hashes.SHA256(),
+    )
+    return signing_input + "." + _b64url(signature)
 
 
-def euskalmet_headers(private_key_pem: str, **kwargs: Any) -> Dict[str, str]:
+def euskalmet_headers(
+    private_key_pem: str, fingerprint: Optional[str] = None, **kwargs: Any
+) -> Dict[str, str]:
     """Return Authorization headers for Euskalmet calls."""
-    token = build_euskalmet_jwt(private_key_pem, **kwargs)
+    token = build_euskalmet_jwt(private_key_pem, fingerprint=fingerprint, **kwargs)
     return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
 

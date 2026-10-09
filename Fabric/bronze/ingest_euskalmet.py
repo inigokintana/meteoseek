@@ -1,40 +1,48 @@
-# Databricks notebook source
-# MAGIC %md
-# MAGIC # Bronze — Euskalmet ingestion
-# MAGIC
-# MAGIC Ingest raw Euskalmet data (station readings + region forecasts) into the
-# Bronze Delta layer as append-only, audit-stamped JSON payloads.
-# MAGIC
-# MAGIC Sources (CMDB.md §2.1):
-# MAGIC - EP-EUS-08 `stations_readings`  -> TBL-01 `euskalmet_station_readings`
-# MAGIC - EP-EUS-05 `weather_region_zone` (fallback) + EP-EUS-04 location forecast
-# MAGIC   -> TBL-02 `euskalmet_forecast_region`
-# MAGIC
-# MAGIC Auth: RS256 JWT signed with the private key held in the Fabric secret
-# MAGIC `euskalmet-private-key` (SEC-01).
+# CELL 1
+#
+# Manually created keyvault fabric-meteoseek-kv in Azure with Euskalmet secrets:
+# euskalmet-fingerprint, euskalmet-priv-key, euskalmet-pub-key
+# Checking we have access
 
-# COMMAND ----------
+from notebookutils import mssparkutils
 
-# MAGIC %md
-# MAGIC ## 0. Notebook parameters (widgets)
+vault_uri = "https://fabric-meteoseek-kv.vault.azure.net/"
 
-# COMMAND ----------
+fingerprint = mssparkutils.credentials.getSecret(vault_uri, "euskalmet-fingerprint")
+priv_key = mssparkutils.credentials.getSecret(vault_uri, "euskalmet-priv-key")
 
-dbutils.widgets.text("lakehouse", "meteoseek_lh", "Lakehouse name")
-dbutils.widgets.text("euskalmet_base_url", "https://api.euskadi.eus", "Euskalmet API base URL")
-dbutils.widgets.text("region_id", "", "Region ID (resolve via geolocations_regions)")
-dbutils.widgets.text("zone_id", "", "Zone ID (resolve via geolocations_zone)")
-dbutils.widgets.text("location_id", "", "Location ID (resolve via geolocations_locations)")
-dbutils.widgets.text("start_hour", "", "Optional start datetime (yyyy-MM-dd HH:mm:ss); empty = last 24h")
+print("Euskalmet fingerprint retrieved:", fingerprint[:8] + "…" if fingerprint else "(empty)")
+print("Euskalmet private key retrieved:", "yes" if priv_key else "(empty)")
+print("Secrets retrieved successfully")
 
-# COMMAND ----------
+# CELL 2
+#
+# Bronze — Euskalmet ingestion
+#
+# Ingest raw Euskalmet data into the Bronze Delta layer as managed tables
+# (append-only, audit-stamped JSON payloads).
+#
+# Sources (CMDB.md §2.1):
+# - EP-EUS-08 `stations_readings`  -> euskalmet_station_readings  (TBL-01)
+# - EP-EUS-05 `weather_region_zone` + EP-EUS-04 location forecast
+#   -> euskalmet_forecast_region                               (TBL-02)
+#
+# Auth: RS256 JWT signed with the private key held in fabric-meteoseek-kv
+# (secret `euskalmet-priv-key`, fingerprint in `euskalmet-fingerprint`).
+#
+# NOTE: no dbutils in Fabric — use plain Python variables / notebook parameters.
 
-# MAGIC %md
-# MAGIC ## 1. Imports + shared helpers
+# Global settings (Fabric: replace with notebook/pipeline parameters as needed)
+lakehouse = "Demo"                          # Lakehouse name
+euskalmet_base_url = "https://api.euskadi.eus"
+region_id = ""                              # resolve via geolocations_regions
+zone_id = ""                                # resolve via geolocations_zone
+location_id = ""                            # resolve via geolocations_locations
 
-# COMMAND ----------
+# CELL 3
+#
+# Imports + shared helpers
 
-import datetime as dt
 import json
 import sys
 import urllib.request
@@ -44,39 +52,30 @@ from pyspark.sql import functions as F
 
 spark = SparkSession.builder.getOrCreate()
 
-# Import the shared helper module. In Fabric this file is placed under the
-# Lakehouse `Files/fabric/` and added to the notebook via sys.path, or attached
-# as a notebook resource. See Fabric/README.md.
-sys.path.insert(0, "/lakehouse/default/Files/fabric/common")
+# importing common library helper functions
+sys.path.insert(0, "/lakehouse/default/Files/meteoseek/common")
 from fabric_utils import (
-    get_secret,
     euskalmet_headers,
     lakehouse_paths,
     write_bronze,
 )
 
-paths = lakehouse_paths(dbutils.widgets.get("lakehouse"))
-base_url = dbutils.widgets.get("euskalmet_base_url").rstrip("/")
+paths = lakehouse_paths(lakehouse)
+base_url = euskalmet_base_url.rstrip("/")
 
-# COMMAND ----------
+# CELL 4
+#
+# Auth — build the RS256 JWT from the Key Vault private key + fingerprint
 
-# MAGIC %md
-# MAGIC ## 2. Auth — build the RS256 JWT from the Key Vault private key
+if not priv_key:
+    raise RuntimeError("Missing secret 'euskalmet-priv-key'. See CMDB.md SEC-01.")
 
-# COMMAND ----------
+headers = euskalmet_headers(priv_key, fingerprint=fingerprint)
 
-private_key_pem = get_secret("euskalmet-private-key")
-if not private_key_pem:
-    raise RuntimeError("Missing secret 'euskalmet-private-key'. See CMDB.md SEC-01.")
+# CELL 5
+#
+# Pull station readings (EP-EUS-08)
 
-headers = euskalmet_headers(private_key_pem)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 3. Pull station readings (EP-EUS-08)
-
-# COMMAND ----------
 
 def euskalmet_get(path: str):
     """GET a Euskalmet endpoint and return the parsed JSON."""
@@ -96,16 +95,9 @@ readings_df = spark.createDataFrame(
      for r in readings_rows]
 )
 
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 4. Pull region-zone forecast (EP-EUS-05, fallback EP-EUS-04)
-
-# COMMAND ----------
-
-zone_id = dbutils.widgets.get("zone_id").strip()
-location_id = dbutils.widgets.get("location_id").strip()
-region_id = dbutils.widgets.get("region_id").strip()
+# CELL 6
+#
+# Pull region-zone forecast (EP-EUS-05, fallback EP-EUS-04)
 
 # Prefer the location-level forecast (EP-EUS-04); fall back to zone/region level.
 forecast_payloads = []
@@ -134,15 +126,11 @@ for payload, ep in forecast_payloads:
 
 forecast_df = spark.createDataFrame(forecast_rows) if forecast_rows else None
 
-# COMMAND ----------
+# CELL 7
+#
+# Write Bronze (managed tables; append-only, idempotent via payload hash)
 
-# MAGIC %md
-# MAGIC ## 5. Write Bronze
-
-# COMMAND ----------
-
-# TBL-01 — station readings. Dedupe on the raw payload hash to stay idempotent
-# while keeping Bronze append-only.
+# TBL-01 — station readings.
 if readings_df.count() > 0:
     readings_df = readings_df.withColumn(
         "payload_hash", F.sha2(F.col("payload"), 256)
@@ -150,7 +138,7 @@ if readings_df.count() > 0:
     write_bronze(
         spark,
         readings_df,
-        f"{paths['bronze']}/euskalmet_station_readings",
+        "euskalmet_station_readings",
         dedupe_cols=["payload_hash"],
     )
     print(f"Wrote {readings_df.count()} station readings to Bronze.")
@@ -161,15 +149,19 @@ if forecast_df is not None and forecast_df.count() > 0:
     write_bronze(
         spark,
         forecast_df,
-        f"{paths['bronze']}/euskalmet_forecast_region",
+        "euskalmet_forecast_region",
         dedupe_cols=["source_ep", "payload_hash"],
     )
     print(f"Wrote {forecast_df.count()} forecast rows to Bronze.")
 else:
     print("No forecast payload returned; region/zone/location IDs may be unset.")
 
-# COMMAND ----------
+# CELL 8
+#
+# Sanity check the managed tables
 
-# MAGIC %md
-# MAGIC ## Done
-# MAGIC Bronze is append-only. The Silver notebook types and keys these payloads.
+df = spark.sql("SELECT * FROM Demo.dbo.euskalmet_station_readings LIMIT 1000")
+display(df)
+
+df = spark.sql("SELECT * FROM Demo.dbo.euskalmet_forecast_region LIMIT 1000")
+display(df)

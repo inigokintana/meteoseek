@@ -1,73 +1,56 @@
-# Databricks notebook source
-# MAGIC %md
-# MAGIC # Silver — Weather (Euskalmet)
-# MAGIC
-# MAGIC Parse raw Euskalmet Bronze JSON into typed, keyed Silver tables:
-# MAGIC
-# MAGIC - `fact_weather_hourly` (TBL-05)  key `(location_id, ts_hour)`
-# MAGIC - `dim_location`       (TBL-08)  key `location_id`
-# MAGIC
-# MAGIC Grain: hour x location. Join key aligns with footfall on `ts_hour`.
+# CELL 1
+#
+# Silver — Weather (Euskalmet)
+#
+# Parse raw Euskalmet Bronze JSON into typed, keyed Silver tables:
+#
+# - fact_weather_hourly  (TBL-05)  key (location_id, ts_hour)
+# - dim_location         (TBL-08)  key location_id
+#
+# Grain: hour x location. Join key aligns with footfall on ts_hour.
+#
+# NOTE: no dbutils in Fabric — plain Python variables.
 
-# COMMAND ----------
+# Global settings
+lakehouse = "Demo"
+location_id = ""   # Location ID (Vitoria-Gasteiz); resolve via geolocations_locations
 
-# MAGIC %md
-# MAGIC ## 0. Parameters
+# CELL 2
+#
+# Imports
 
-# COMMAND ----------
-
-dbutils.widgets.text("lakehouse", "meteoseek_lh", "Lakehouse name")
-dbutils.widgets.text("location_id", "", "Location ID (Vitoria-Gasteiz)")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 1. Imports
-
-# COMMAND ----------
-
-import json
 import sys
 
-from pyspark.sql import SparkSession, Row
+from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import StructType, StructField, StringType, TimestampType, DoubleType, LongType
 
 spark = SparkSession.builder.getOrCreate()
 
-sys.path.insert(0, "/lakehouse/default/Files/fabric/common")
-from fabric_utils import lakehouse_paths, read_delta, upsert_delta, parse_ts
+sys.path.insert(0, "/lakehouse/default/Files/meteoseek/common")
+from fabric_utils import read_table, upsert_table
 
-paths = lakehouse_paths(dbutils.widgets.get("lakehouse"))
-location_id = dbutils.widgets.get("location_id").strip()
+# CELL 3
+#
+# Load Bronze station readings (TBL-01)
 
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 2. Load Bronze station readings (TBL-01)
-
-# COMMAND ----------
-
-readings = read_delta(spark, f"{paths['bronze']}/euskalmet_station_readings")
+readings = read_table(spark, "euskalmet_station_readings")
 if readings is None:
     raise RuntimeError("No Bronze station readings found. Run ingest_euskalmet first.")
 
-# COMMAND ----------
+# CELL 4
+#
+# Parse payloads into typed weather facts
+#
+# The exact field names inside the Euskalmet payload vary by endpoint and
+# station schema. We use get_json_object defensively and coalesce the common
+# meteorological variables (temperature, precipitation, wind, cloud). Adjust
+# the JSON paths once the first geolocation pull confirms the payload shape
+# (CMDB.md §9 open item).
 
-# MAGIC %md
-# MAGIC ## 3. Parse payloads into typed weather facts
-# MAGIC
-# MAGIC The exact field names inside the Euskalmet payload vary by endpoint and
-# MAGIC station schema. We use `get_json_object` defensively and coalesce the
-# MAGIC common meteorological variables (temperature, precipitation, wind, cloud).
-# MAGIC Adjust the JSON paths below to the confirmed Euskalmet payload once the
-# MAGIC first geolocation pull is done (CMDB.md §9 open item).
 
-# COMMAND ----------
-
-# Defensive extraction: try several plausible JSON paths for each measure.
 def _json_any(col_expr, *paths):
     return F.coalesce(*[F.get_json_object(col_expr, p) for p in paths])
+
 
 weather = (
     readings
@@ -102,23 +85,14 @@ weather = (
     .dropna(subset=["ts_hour"])
 )
 
-# COMMAND ----------
+# CELL 5
+#
+# Write Silver fact_weather_hourly (TBL-05)
 
-# MAGIC %md
-# MAGIC ## 4. Write Silver `fact_weather_hourly` (TBL-05)
-
-# COMMAND ----------
-
-upsert_delta(
+upsert_table(
     spark,
     weather,
-    f"{paths['silver']}/fact_weather_hourly",
+    "fact_weather_hourly",
     key_cols=["location_id", "ts_hour"],
 )
 print(f"Upserted {weather.count()} rows into fact_weather_hourly.")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Done
-# MAGIC `fact_weather_hourly` is typed and keyed on `(location_id, ts_hour)`.

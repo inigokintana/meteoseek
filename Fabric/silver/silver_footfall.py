@@ -1,32 +1,24 @@
-# Databricks notebook source
-# MAGIC %md
-# MAGIC # Silver — Footfall (Seeketing)
-# MAGIC
-# MAGIC Parse raw Seeketing Bronze JSON into typed, keyed Silver tables:
-# MAGIC
-# MAGIC - `fact_footfall_hourly` (TBL-06)  key `(zone_id, ts_hour)`
-# MAGIC - `dim_zone`             (TBL-07)  key `zone_id`
-# MAGIC
-# MAGIC Grain: hour x zone. The `timestamp` field from `getZoneVisitsH` is
-# MAGIC truncated to the hour to align with `fact_weather_hourly`.
+# CELL 1
+#
+# Silver — Footfall (Seeketing)
+#
+# Parse raw Seeketing Bronze JSON into typed, keyed Silver tables:
+#
+# - fact_footfall_hourly  (TBL-06)  key (zone_id, ts_hour)
+# - dim_zone              (TBL-07)  key zone_id
+#
+# Grain: hour x zone. The timestamp field from getZoneVisitsH is truncated to
+# the hour to align with fact_weather_hourly.
+#
+# NOTE: no dbutils in Fabric — plain Python variables.
 
-# COMMAND ----------
+# Global settings
+lakehouse = "Demo"
 
-# MAGIC %md
-# MAGIC ## 0. Parameters
+# CELL 2
+#
+# Imports
 
-# COMMAND ----------
-
-dbutils.widgets.text("lakehouse", "meteoseek_lh", "Lakehouse name")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 1. Imports
-
-# COMMAND ----------
-
-import json
 import sys
 
 from pyspark.sql import SparkSession
@@ -34,33 +26,25 @@ from pyspark.sql import functions as F
 
 spark = SparkSession.builder.getOrCreate()
 
-sys.path.insert(0, "/lakehouse/default/Files/fabric/common")
-from fabric_utils import lakehouse_paths, read_delta, upsert_delta
+sys.path.insert(0, "/lakehouse/default/Files/meteoseek/common")
+from fabric_utils import read_table, upsert_table
 
-paths = lakehouse_paths(dbutils.widgets.get("lakehouse"))
+# CELL 3
+#
+# Load Bronze visits (TBL-03) + zones (dim_zone snapshot)
 
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 2. Load Bronze visits (TBL-03) + zones (dim_zone snapshot)
-
-# COMMAND ----------
-
-visits = read_delta(spark, f"{paths['bronze']}/seeketing_zone_visits_h")
-zones = read_delta(spark, f"{paths['bronze']}/seeketing_zones")
+visits = read_table(spark, "seeketing_zone_visits_h")
+zones = read_table(spark, "seeketing_zones")
 
 if visits is None:
     raise RuntimeError("No Bronze zone visits found. Run ingest_seeketing first.")
 
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 3. Build `dim_zone` (TBL-07) from the latest zone snapshot
-# MAGIC
-# MAGIC `getAppZonesPublic` returns zone metadata (id, name, nodes, status).
-# MAGIC We keep the most recent payload per zone id.
-
-# COMMAND ----------
+# CELL 4
+#
+# Build dim_zone (TBL-07) from the latest zone snapshot
+#
+# getAppZonesPublic returns zone metadata (id, name, nodes, status). We keep
+# the most recent payload per zone id.
 
 if zones is not None:
     dim_zone = (
@@ -75,20 +59,17 @@ if zones is not None:
         .dropDuplicates(["zone_id"])
         .select("zone_id", "zone_name", "short_name", "active", "status", "nodes")
     )
-    upsert_delta(spark, dim_zone, f"{paths['silver']}/dim_zone", key_cols=["zone_id"])
+    upsert_table(spark, dim_zone, "dim_zone", key_cols=["zone_id"])
     print(f"Upserted {dim_zone.count()} zones into dim_zone.")
 else:
     print("No zone snapshot in Bronze; skipping dim_zone.")
 
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 4. Build `fact_footfall_hourly` (TBL-06)
-# MAGIC
-# MAGIC Fields from `getZoneVisitsH`: visits, new_visits, recurrents,
-# MAGIC visitors_unique, visittime_avg, visit_time_zone_avg, presencetime_avg.
-
-# COMMAND ----------
+# CELL 5
+#
+# Build fact_footfall_hourly (TBL-06)
+#
+# Fields from getZoneVisitsH: visits, new_visits, recurrents, visitors_unique,
+# visittime_avg, visit_time_zone_avg, presencetime_avg.
 
 footfall = (
     visits
@@ -113,15 +94,9 @@ footfall = (
     )
 )
 
-upsert_delta(
+upsert_table(
     spark, footfall,
-    f"{paths['silver']}/fact_footfall_hourly",
+    "fact_footfall_hourly",
     key_cols=["zone_id", "ts_hour"],
 )
 print(f"Upserted {footfall.count()} rows into fact_footfall_hourly.")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Done
-# MAGIC `fact_footfall_hourly` + `dim_zone` are typed and keyed on `(zone_id, ts_hour)`.

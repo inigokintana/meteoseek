@@ -54,26 +54,31 @@ Fabric/
 
 ## Prerequisites
 
-1. **Fabric workspace `DEMO`** with a Lakehouse (default name assumed:
-   `meteoseek_lh` — override via the `lakehouse` widget on every notebook).
+1. **Fabric workspace `DEMO`** with a Lakehouse (the working Lakehouse name is
+   `Demo`; bronze lands under `Files/meteoseek/bronze`, silver/gold as managed
+   `Tables`). Override via the `lakehouse` variable in each notebook.
 2. **Fabric capacity** (F16 per CMDB ENV-03).
-3. **Secrets registered** in the workspace (see below).
-4. **PyJWT + requests** available on the Spark runtime. Fabric runtimes ship
-   `requests`; for PyJWT either add it to the environment (Environment →
-   Spark properties → libraries) or swap `build_euskalmet_jwt` to the
-   `cryptography` stdlib approach.
+3. **Secrets registered** in Azure Key Vault `fabric-meteoseek-kv` (see below).
+4. **`requests` + `cryptography`** available on the Spark runtime. Fabric Spark
+   runtimes ship both (the JWT is signed with `cryptography`, so no PyJWT
+   dependency is required).
 
-### Required Fabric secrets (CMDB §3)
+### Required Key Vault secrets (CMDB §3)
 
-| Secret name            | CI ID  | Content                                  |
-|------------------------|--------|------------------------------------------|
-| `euskalmet-private-key`| SEC-01 | RS256 private key (PEM) for JWT signing  |
-| `seeketing-login`      | SEC-02 | Seeketing Observer login                  |
-| `seeketing-password`   | SEC-02 | Seeketing Observer password               |
+All secrets live in Azure Key Vault `fabric-meteoseek-kv` and are read by
+notebooks via `mssparkutils.credentials.getSecret(vault_uri, secret_name)`.
 
-Register them under **Workspace → Settings → Data Engineering → Secrets**
-(or the equivalent Key Vault-linked secret UI), matching the names exactly as
-used by `fabric_utils.get_secret()`.
+| Secret name             | CI ID  | Content                                  |
+|-------------------------|--------|------------------------------------------|
+| `euskalmet-priv-key`    | SEC-01 | RS256 private key (PEM) for JWT signing  |
+| `euskalmet-pub-key`     | SEC-01 | RS256 public key (PEM, verification)     |
+| `euskalmet-fingerprint` | SEC-01 | Key fingerprint (JWT `kid` header)       |
+| `seeketing-login`       | SEC-02 | Seeketing Observer login                 |
+| `seeketing-password`    | SEC-02 | Seeketing Observer password              |
+| `seeketing-app-id`      | SEC-02 | Seeketing Vitoria deployment `app_id`    |
+
+The notebooks read these directly from Key Vault (do NOT register them as
+Fabric workspace secrets — the `vault_uri` is referenced inline).
 
 ---
 
@@ -82,12 +87,12 @@ used by `fabric_utils.get_secret()`.
 Fabric notebooks do not share a Python path by default. Two supported options:
 
 **Option A — Lakehouse `Files` (recommended):** upload
-`common/fabric_utils.py` to `meteoseek_lh/Files/fabric/common/fabric_utils.py`,
+`common/fabric_utils.py` to `Demo/Files/meteoseek/common/fabric_utils.py`,
 then in each notebook prepend:
 
 ```python
 import sys
-sys.path.insert(0, "/lakehouse/default/Files/fabric/common")
+sys.path.insert(0, "/lakehouse/default/Files/meteoseek/common")
 from fabric_utils import ...
 ```
 
@@ -145,22 +150,26 @@ Chain them with `On success` connectors and set the schedule on the pipeline.
 
 ## Configuring notebook parameters
 
-Every notebook exposes `dbutils.widgets.text(...)` parameters. At minimum fill:
+Fabric has no `dbutils.widgets` — notebooks use plain Python variables set at
+the top of each file. At minimum set:
 
-- `lakehouse` — Lakehouse name (default `meteoseek_lh`)
+- `lakehouse` — Lakehouse name (working value `Demo`)
 - `location_id` / `zone_id` / `region_id` — resolved from the first Euskalmet
   geolocation pull (CMDB MAP-03/04, currently TBD)
-- `app_id` — Seeketing Vitoria deployment (CMDB SRC-SEK-05 / MAP-02)
+- `app_id` / `my_app_id` — Seeketing Vitoria deployment (read from KV secret
+  `seeketing-app-id`; CMDB SRC-SEK-05 / MAP-02)
 
-Set these as pipeline parameters so the schedule passes them through.
+For scheduled runs, wire these as Fabric pipeline parameters or notebook
+parameters so the schedule passes them through.
 
 ---
 
 ## Verification checklist
 
-- [ ] Secrets `euskalmet-private-key`, `seeketing-login`, `seeketing-password` registered
-- [ ] `fabric_utils.py` uploaded to `Files/fabric/common/`
-- [ ] Bronze notebooks run clean and write 4 raw tables
+- [ ] KV secrets `euskalmet-priv-key` / `euskalmet-pub-key` / `euskalmet-fingerprint`,
+      `seeketing-login` / `seeketing-password` / `seeketing-app-id` present
+- [ ] `fabric_utils.py` uploaded to `Files/meteoseek/common/`
+- [ ] Bronze notebooks run clean and write raw tables (`euskalmet_*`, `seeketing_*`)
 - [ ] Silver notebooks produce typed `fact_weather_hourly` / `fact_footfall_hourly`
 - [ ] Gold produces `fact_occupancy_hourly`, `fact_forecast`, `dim_time`
 - [ ] Pipeline scheduled and ordered Bronze → Silver → Gold
