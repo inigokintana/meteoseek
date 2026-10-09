@@ -7,7 +7,7 @@
 | **Project** | MeteoSeek |
 | **City / Scope** | Vitoria-Gasteiz (Basque Country, Spain) |
 | **Primary data sources** | Euskalmet (Open Data Euskadi) · Seeketing Observer REST API |
-| **Target landing zone** | Azure Fabric — workspace `DEMO` |
+| **Target landing zone** | Azure Fabric Spark Settings 2.0 (Spark 4.1 Delta 4.2) — workspace `DEMO` |
 | **Downstream analytics** | Power BI reports · Hermes Agent conversational predictions |
 | **Status** | DEMO / Proof-of-Concept |
 

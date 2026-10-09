@@ -1,6 +1,6 @@
 # Fabric — MeteoSeek medallion pipelines
 
-PySpark notebooks that land Euskalmet + Seeketing data into the Azure Fabric
+PySpark notebooks that land Euskalmet + Seeketing data into the Azure Fabric Spark Settings 2.0 (Spark 4.1 Delta 4.2)
 `DEMO` workspace using a Bronze → Silver → Gold medallion architecture.
 
 Everything here is plain Python (`.py`) written in the Databricks notebook

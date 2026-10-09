@@ -10,7 +10,7 @@
 
 | CI ID | Type | Name | Value / Notes | Owner |
 |---|---|---|---|---|
-| ENV-01 | Azure Fabric Workspace | `DEMO` | Landing zone for all Bronze/Silver/Gold data. OneLake + Power BI + Pipelines. | Data Eng. |
+| ENV-01 | Azure Fabric Spark Settings 2.0 (Spark 4.1 Delta 4.2)  Workspace | `DEMO` | Landing zone for all Bronze/Silver/Gold data. OneLake + Power BI + Pipelines. | Data Eng. |
 | ENV-02 | Region | West Europe | Assumed Azure region (confirm). | Infra |
 | ENV-03 | Tenant / Capacity | F16 for now | Fabric capacity SKU + tenant ID. | Infra |
 

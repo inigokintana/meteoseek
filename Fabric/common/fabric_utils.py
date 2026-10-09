@@ -39,15 +39,17 @@ from pyspark.sql import SparkSession, DataFrame, Column
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StringType
 
-
+from delta.tables import DeltaTable
+from pyspark.sql.utils import AnalysisException
+from typing import Iterable
 # --------------------------------------------------------------------------- #
 # Lakehouse paths
 # --------------------------------------------------------------------------- #
 # OneLake paths are lakehouse-relative. The default Lakehouse is assumed to be
 # "meteoseek_lh" (the workspace DEMO Lakehouse). Override via widget/env.
-DEFAULT_LAKEHOUSE = "meteoseek_lh"
+DEFAULT_LAKEHOUSE = "demo"
 
-BRONZE = "Files/bronze"
+BRONZE = "Files/meteoseek/bronze"
 SILVER = "Tables"
 GOLD = "Tables"
 
@@ -75,7 +77,10 @@ def get_secret(secret_name: str) -> str:
         # `mssparkutils` is available in Fabric notebooks at runtime.
         from notebookutils import mssparkutils  # type: ignore
 
-        return mssparkutils.credentials.getSecret(secret_name)
+        return mssparkutils.credentials.getSecret(
+            "https://fabric-meteoseek-kv.vault.azure.net/",
+            secret_name
+    )
     except Exception:
         spark = SparkSession.getActiveSession()
         if spark is not None:
@@ -181,72 +186,96 @@ def seeketing_call(key: str, method: str, params: Dict[str, Any]) -> Any:
 # --------------------------------------------------------------------------- #
 # Delta helpers
 # --------------------------------------------------------------------------- #
-def read_delta(spark: SparkSession, path: str) -> Optional[DataFrame]:
-    """Read a Delta table if it exists, else None (idempotent first run)."""
-    from delta.tables import DeltaTable  # type: ignore
-
-    if DeltaTable.isDeltaTable(spark, path):
-        return spark.read.format("delta").load(path)
-    return None
+def read_table(spark: SparkSession, table_name: str) -> Optional[DataFrame]:
+    """
+    Read a Delta table if it exists, else None.
+    """
+    try:
+        return spark.table(table_name)
+    except AnalysisException:
+        return None
 
 
 def write_bronze(
     spark: SparkSession,
     df: DataFrame,
-    path: str,
+    table_name: str,
     dedupe_cols: Iterable[str],
     ingestion_ts_col: str = "ingested_at",
 ) -> None:
-    """Append raw rows to a Bronze Delta table, deduplicating on `dedupe_cols`.
+    """
+    Append raw rows to a Bronze Delta table, deduplicating on dedupe_cols.
 
-    Bronze is append-only with an ingestion timestamp for auditability. To keep
-    re-runs idempotent we drop rows whose (dedupe_cols) already exist.
+    Bronze is append-only with an ingestion timestamp.
+    Re-runs are idempotent because existing hashes are excluded.
     """
     dedupe_cols = list(dedupe_cols)
-    existing = read_delta(spark, path)
+
+    existing = read_table(spark, table_name)
+
     if existing is None:
-        df = df.withColumn(ingestion_ts_col, F.current_timestamp())
-        df.write.format("delta").mode("append").option("mergeSchema", "true").save(path)
+        (
+            df.withColumn(ingestion_ts_col, F.current_timestamp())
+              .write
+              .format("delta")
+              .mode("overwrite")
+              .saveAsTable(table_name)
+        )
         return
 
-    join_cond = existing[dedupe_cols[0]] == df[dedupe_cols[0]]
-    for c in dedupe_cols[1:]:
-        join_cond = join_cond & (existing[c] == df[c])
+    new_rows = df.join(
+        existing.select(*dedupe_cols),
+        on=dedupe_cols,
+        how="left_anti"
+    )
 
-    new_rows = df.join(existing.select(dedupe_cols), on=dedupe_cols, how="left_anti")
     if new_rows.isEmpty():
         return
-    new_rows = new_rows.withColumn(ingestion_ts_col, F.current_timestamp())
-    new_rows.write.format("delta").mode("append").option("mergeSchema", "true").save(path)
+
+    (
+        new_rows.withColumn(ingestion_ts_col, F.current_timestamp())
+                .write
+                .format("delta")
+                .mode("append")
+                .option("mergeSchema", "true")
+                .saveAsTable(table_name)
+    )
 
 
-def upsert_delta(
+def upsert_table(
     spark: SparkSession,
     df: DataFrame,
-    path: str,
+    table_name: str,
     key_cols: Iterable[str],
 ) -> None:
-    """Idempotent MERGE (upsert) into a Delta table keyed on `key_cols`.
-
-    Used for Silver (typed, keyed) and Gold (aggregated) layers. Rows present
-    with the same key are updated; new keys are inserted.
     """
-    from delta.tables import DeltaTable  # type: ignore
+    Idempotent MERGE into a managed Delta table.
+    """
 
     key_cols = list(key_cols)
-    if not DeltaTable.isDeltaTable(spark, path):
-        df.write.format("delta").mode("overwrite").save(path)
+
+    if not spark.catalog.tableExists(table_name):
+        (
+            df.write
+              .format("delta")
+              .mode("overwrite")
+              .saveAsTable(table_name)
+        )
         return
 
-    target = DeltaTable.forPath(spark, path)
-    merge_cond = target.toDF()[key_cols[0]] == df[key_cols[0]]
-    for c in key_cols[1:]:
-        merge_cond = merge_cond & (target.toDF()[c] == df[c])
+    target = DeltaTable.forName(spark, table_name)
 
-    target.alias("t").merge(
-        df.alias("s"), merge_cond
-    ).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+    merge_condition = " AND ".join(
+        [f"t.{c} = s.{c}" for c in key_cols]
+    )
 
+    (
+        target.alias("t")
+              .merge(df.alias("s"), merge_condition)
+              .whenMatchedUpdateAll()
+              .whenNotMatchedInsertAll()
+              .execute()
+    )
 
 # --------------------------------------------------------------------------- #
 # Misc helpers
